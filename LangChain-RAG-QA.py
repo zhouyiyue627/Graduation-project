@@ -1,225 +1,402 @@
-# 终端运行：streamlit run LangChain-RAG-QA.py
+# streamlit run LangChain-RAG-QA.py
+
 import streamlit as st
 import tempfile
 import os
+import re
 
-from langchain_classic.memory import ConversationBufferMemory
-from langchain_community.chat_message_histories import StreamlitChatMessageHistory
 from langchain_community.document_loaders import TextLoader
-
-# 修改1
 from langchain_community.embeddings import DashScopeEmbeddings
-
 from langchain_chroma import Chroma
-from langchain_core.prompts import PromptTemplate
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_classic.agents import create_react_agent
-from langchain_classic.agents import AgentExecutor
-from langchain_community.callbacks.streamlit import StreamlitCallbackHandler
-
-# 修改2
 from langchain_community.chat_models import ChatTongyi
 
 
-# 页面配置
-st.set_page_config(page_title="文档问答", layout="wide")
-st.title("文档问答")
+# ================= 页面配置 =================
 
-# ================= API配置 =================
+st.set_page_config(
+    page_title="RAG 文档问答",
+    layout="wide"
+)
+
+st.markdown("""
+<style>
+
+/* ===== 侧边栏 ===== */
+
+section[data-testid="stSidebar"]{
+padding-top:10px;
+}
+
+.sidebar-title{
+font-size:22px;
+font-weight:700;
+margin-top:18px;
+margin-bottom:8px;
+}
+
+/* ===== 主页面 ===== */
+
+/* 主标题 */
+h1{
+font-size:42px !important;
+font-weight:800 !important;
+letter-spacing:1px;
+margin-bottom:10px;
+}
+
+/* 二级标题 */
+h2{
+font-size:22px !important;
+font-weight:600 !important;
+margin-top:22px !important;
+}
+
+/* 正文 */
+p{
+font-size:16px;
+line-height:1.8;
+}
+
+/* 引用角标 */
+.ref{
+color:#1f77b4;
+font-size:13px;
+font-weight:600;
+margin-left:3px;
+}
+
+/* 引用角标链接 */
+.ref a{
+color:#1f77b4;
+text-decoration:none;
+}
+
+</style>
+""", unsafe_allow_html=True)
+
+
+st.title("📚 文档问答系统")
+
+
+# ================= API =================
+
 with st.sidebar:
-    st.subheader("API配置")
 
-    ai_api_key = st.text_input("DashScope API Key", type="password")
+    st.markdown("<div class='sidebar-title'>🔑 API配置</div>",unsafe_allow_html=True)
 
-    if ai_api_key:
-        os.environ["DASHSCOPE_API_KEY"] = ai_api_key
+    api_key=st.text_input("API Key",type="password")
 
-if not ai_api_key:
-    st.warning("请在侧边栏输入DashScope API Key后继续")
+    if api_key:
+        os.environ["DASHSCOPE_API_KEY"]=api_key
+
+if not api_key:
+    st.warning("请输入API Key")
     st.stop()
-# ==========================================
 
 
-# 上传TXT文件
-uploaded_files = st.sidebar.file_uploader(
-    label="上传txt文件",
+# ================= 上传 =================
+
+st.sidebar.markdown("<div class='sidebar-title'>📂 上传TXT文件</div>",unsafe_allow_html=True)
+
+uploaded_files=st.sidebar.file_uploader(
+    "选择 TXT 文件",
     type=["txt"],
     accept_multiple_files=True
 )
 
 if not uploaded_files:
-    st.info("请先上传TXT文档。")
+    st.info("请上传TXT文件")
     st.stop()
 
 
-# ================= 构建检索器 =================
-@st.cache_resource(ttl="1h")
-def configure_retriever(uploaded_files):
+# ================= 文档浏览 =================
 
-    docs = []
+st.sidebar.markdown("<div class='sidebar-title'>📑 文档浏览</div>",unsafe_allow_html=True)
 
-    temp_dir = tempfile.TemporaryDirectory(dir=r"/Users/e/Desktop/code-design")
+for f in uploaded_files:
+
+    with st.sidebar.expander(f.name):
+
+        preview=f.read().decode("utf-8")[:500]
+
+        st.write(preview+"...")
+
+
+# ================= 参数 =================
+
+st.sidebar.markdown("<div class='sidebar-title'>⚙️ Top-K 检索数量</div>",unsafe_allow_html=True)
+
+top_k=st.sidebar.slider(
+    "检索文档数量",
+    1,10,5
+)
+
+st.sidebar.markdown("<div class='sidebar-title'>🐞 RAG Debug</div>",unsafe_allow_html=True)
+
+debug_mode=st.sidebar.checkbox("显示检索过程")
+
+
+# ================= 构建向量库 =================
+
+@st.cache_resource
+def build_vector_db(uploaded_files):
+
+    docs=[]
+
+    temp_dir=tempfile.TemporaryDirectory()
 
     for file in uploaded_files:
 
-        temp_filepath = os.path.join(temp_dir.name, file.name)
+        path=os.path.join(temp_dir.name,file.name)
 
-        with open(temp_filepath, "wb") as f:
+        with open(path,"wb") as f:
             f.write(file.getvalue())
 
-        loader = TextLoader(temp_filepath, encoding="utf-8")
+        loader=TextLoader(path,encoding="utf-8")
 
         docs.extend(loader.load())
 
-    # 文档切分
-    text_splitter = RecursiveCharacterTextSplitter(
+    splitter=RecursiveCharacterTextSplitter(
         chunk_size=1000,
         chunk_overlap=200
     )
 
-    splits = text_splitter.split_documents(docs)
+    splits=splitter.split_documents(docs)
 
-    # ===== 修改3：Embedding（DashScope）=====
-    embeddings = DashScopeEmbeddings(
+    embeddings=DashScopeEmbeddings(
         model="text-embedding-v2"
     )
 
-    vectordb = Chroma.from_documents(splits, embeddings)
+    vectordb=Chroma.from_documents(
+        splits,
+        embeddings
+    )
 
-    retriever = vectordb.as_retriever()
-
-    return retriever
-
-
-retriever = configure_retriever(uploaded_files)
-# ==============================================
+    return vectordb
 
 
-# 初始化聊天记录
-if "messages" not in st.session_state or st.sidebar.button("清空聊天记录"):
-    st.session_state["messages"] = [
-        {"role": "assistant", "content": "您好，我是文档问答助手"}
+vectordb=build_vector_db(uploaded_files)
+
+
+# ================= 高亮 =================
+
+def highlight(text,query):
+
+    words=query.split()
+
+    for w in words:
+
+        text=re.sub(
+            re.escape(w),
+            f"<mark style='background:#ffe066'>{w}</mark>",
+            text,
+            flags=re.IGNORECASE
+        )
+
+    return text
+
+# ================= 引用证据高亮 =================
+
+def highlight_evidence(text, answer):
+
+    # 从回答里提取关键词
+    words = re.findall(r'[\u4e00-\u9fa5]{2,}', answer)
+
+    words = list(set(words))[:8]   # 限制数量，避免过多高亮
+
+    for w in words:
+
+        text = re.sub(
+            re.escape(w),
+            f"<mark style='background:#ffd54f;font-weight:bold'>{w}</mark>",
+            text
+        )
+
+    return text
+
+
+# ================= 引用脚标（可点击） =================
+
+def style_refs(answer):
+
+    def replace_ref(match):
+
+        num=match.group(1)
+
+        return f"<sup class='ref'><a href='#ref-{num}'>[{num}]</a></sup>"
+
+    answer=re.sub(
+        r"\[(\d+)\]",
+        replace_ref,
+        answer
+    )
+
+    return answer
+
+
+# ================= 检索 =================
+
+def get_sources(query):
+
+    docs_scores=vectordb.similarity_search_with_score(
+        query,
+        k=top_k
+    )
+
+    results=[]
+
+    for doc,score in docs_scores:
+
+        similarity=1/(1+score)
+
+        similarity=round(similarity,3)
+
+        results.append({
+
+        "content":doc.page_content,
+
+        "source":os.path.basename(
+        doc.metadata.get("source","未知")
+        ),
+
+        "score":similarity
+        })
+
+    results=sorted(results,key=lambda x:x["score"],reverse=True)
+
+    return results
+
+
+# ================= LLM =================
+
+llm=ChatTongyi(
+model="qwen-plus",
+temperature=0
+)
+
+
+# ================= 聊天历史 =================
+
+if "messages" not in st.session_state:
+
+    st.session_state.messages=[
+    {"role":"assistant","content":"嗨！我是文档问答小助手，随时为你解答文档相关问题～"}
     ]
 
-# 显示历史消息
+
 for msg in st.session_state.messages:
+
     st.chat_message(msg["role"]).write(msg["content"])
 
 
-# ================= 创建检索工具 =================
-from langchain_classic.tools.retriever import create_retriever_tool
+# ================= 用户输入 =================
 
-tool = create_retriever_tool(
-    retriever,
-    name="文档检索",
-    description="用于检索用户提出的问题，并基于检索到的文档内容进行回复。",
-)
+query=st.chat_input("请输入问题")
 
-tools = [tool]
-# ===============================================
-
-
-# 聊天历史
-msgs = StreamlitChatMessageHistory()
-
-memory = ConversationBufferMemory(
-    chat_memory=msgs,
-    return_messages=True,
-    memory_key="chat_history",
-    output_key="output"
-)
-
-
-# ================= Prompt =================
-instructions = """您是一个设计用于查询文档来回答问题的代理。
-您可以使用文档检索工具，并基于检索内容来回答问题。
-如果您从文档中找不到任何信息用于回答问题，则只需返回“抱歉，这个问题我还不知道。”。
-"""
-
-base_prompt_template = """
-{instructions}
-
-TOOLS:
-------
-
-You have access to the following tools:
-
-{tools}
-
-Tool names:
-{tool_names}
-
-To use a tool, please use the format:
-
-Thought: Do I need to use a tool? Yes
-Action: the action to take
-Action Input: the input
-Observation: the result
-
-When you have a response:
-
-Thought: Do I need to use a tool? No
-Final Answer: your response
-
-
-Previous conversation history:
-{chat_history}
-
-New input: {input}
-
-{agent_scratchpad}
-"""
-
-base_prompt = PromptTemplate.from_template(base_prompt_template)
-
-prompt = base_prompt.partial(instructions=instructions)
-# ==========================================
-
-
-# ================= LLM（千问）=================
-llm = ChatTongyi(
-    model="qwen-plus",
-    temperature=0
-)
-# ============================================
-
-
-# 创建Agent
-agent = create_react_agent(llm, tools, prompt)
-
-agent_executor = AgentExecutor(
-    agent=agent,
-    tools=tools,
-    memory=memory,
-    verbose=True,
-    handle_parsing_errors="没有从知识库检索到相似内容"
-)
-
-
-# 用户输入
-user_query = st.chat_input(placeholder="请开始提问吧！")
-
-if user_query:
+if query:
 
     st.session_state.messages.append(
-        {"role": "user", "content": user_query}
+    {"role":"user","content":query}
     )
 
-    st.chat_message("user").write(user_query)
+    st.chat_message("user").write(query)
+
 
     with st.chat_message("assistant"):
 
-        st_cb = StreamlitCallbackHandler(st.container())
+        sources=get_sources(query)
 
-        config = {"callbacks": [st_cb]}
+        context=""
 
-        response = agent_executor.invoke(
-            {"input": user_query},
-            config=config
-        )
+        for i,src in enumerate(sources,start=1):
 
-        st.session_state.messages.append(
-            {"role": "assistant", "content": response["output"]}
-        )
+            context+=f"\n[{i}] {src['content']}\n"
 
-        st.write(response["output"])
+
+        rag_prompt=f"""
+请根据文档回答问题，并在引用处标注数字。
+
+问题:
+{query}
+
+文档:
+{context}
+
+引用示例:
+[1][2]
+"""
+
+        answer=llm.invoke(rag_prompt).content
+
+
+        refs=re.findall(r"\[(\d+)\]",answer)
+
+        used=sorted(set(map(int,refs)))
+
+        mapping={old:i+1 for i,old in enumerate(used)}
+
+        for old, new in mapping.items():
+            answer = answer.replace(f"[{old}]", f"[{new}]")
+
+        # 删除回答里的“引用来源”
+        answer = re.sub(r"引用来源[:：].*", "", answer)
+
+        # 删除单独一行的引用编号，例如：[1] [2]
+        answer = re.sub(r"\n?\s*(\[\d+\]\s*)+\s*$", "", answer)
+
+        styled_answer=style_refs(answer)
+
+        st.markdown(styled_answer,unsafe_allow_html=True)
+
+        # ===== 引用出处 =====
+
+        if used:
+
+            st.markdown("## 📎 引用出处")
+
+            for old, new in mapping.items():
+                src = sources[old - 1]
+
+                st.markdown(
+                    f"<div id='ref-{new}'></div>",
+                    unsafe_allow_html=True
+                )
+
+                with st.expander(f"[{new}] 📄 {src['source']}"):
+                    evidence = highlight_evidence(
+                        src["content"],
+                        answer
+                    )
+
+                    st.markdown(
+                        f"""
+                        <div style="
+                        background:#f8f9fa;
+                        padding:14px;
+                        border-radius:8px;
+                        line-height:1.8;
+                        font-size:15px;
+                        ">
+                        {evidence}
+                        </div>
+                        """,
+                        unsafe_allow_html=True
+                    )
+
+
+        # ===== 检索结果 =====
+
+        st.markdown("## 🔎 检索结果")
+
+        for i,src in enumerate(sources,start=1):
+
+            score=round(src["score"]*100,1)
+
+            with st.expander(f"{i}. {src['source']} ｜ 相似度 {score}%"):
+
+                text=highlight(src["content"],query)
+
+                st.markdown(text,unsafe_allow_html=True)
+
+                st.progress(src["score"])
