@@ -30,22 +30,58 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-
-/* ===== 侧边栏 ===== */
-
+/* ===== 侧边栏字体层级 =====
+   L1 功能块标题          : 15px 700  加粗主标题
+   L2 控件标签 / 正文      : 13px 400  常规控件（checkbox/input/expander标题）
+   L3 辅助提示 / 次要信息  : 12px 400 灰色  小提示/caption/已选tag/文本框输入
+   ================================= */
 section[data-testid="stSidebar"]{
-padding-top:10px;
+    padding-top:10px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
 }
-
+/* L1：功能块标题（自定义div） */
 .sidebar-title{
-font-size:22px;
-font-weight:700;
-margin-top:18px;
-margin-bottom:8px;
+    font-size:15px !important;
+    font-weight:700 !important;
+    margin-top:16px;
+    margin-bottom:6px;
+    color: rgb(49, 51, 63) !important;
 }
-
+/* L2：所有控件label（checkbox/radio/input等）+ expander标题（文件预览文件名） */
+section[data-testid="stSidebar"] label,
+section[data-testid="stSidebar"] details summary p,
+section[data-testid="stSidebar"] [data-testid="stCheckboxLabel"] {
+    font-size:13px !important;
+    font-weight:400 !important;
+    color: rgb(49, 51, 63) !important;
+    line-height:1.5 !important;
+}
+/* L3：辅助提示（caption/小文字）+ 所有次要信息 */
+section[data-testid="stSidebar"] .stCaption,
+section[data-testid="stSidebar"] [data-testid="stCaptionContainer"] p,
+/* 文本框输入/占位符 */
+section[data-testid="stSidebar"] textarea,
+section[data-testid="stSidebar"] textarea::placeholder,
+/* 多选框已选tag */
+section[data-testid="stSidebar"] [data-baseweb="tag"] span,
+/* 数字输入框/按钮文字 */
+section[data-testid="stSidebar"] input[type="number"],
+section[data-testid="stSidebar"] button,
+/* expander内部的次要文字（文件大小/提示） */
+section[data-testid="stSidebar"] .stExpanderContent p,
+section[data-testid="stSidebar"] .stExpanderContent .stCaption,
+/* 滑块标签文字 */
+section[data-testid="stSidebar"] [data-testid="stSliderLabel"] {
+    font-size:12px !important;
+    font-weight:400 !important;
+    color:#888 !important;
+    line-height:1.4 !important;
+}
+/* 修复滑块刻度文字大小 */
+section[data-testid="stSidebar"] [data-testid="stSliderValue"] {
+    font-size:12px !important;
+}
 /* ===== 主页面 ===== */
-
 /* 主标题 */
 h1{
 font-size:42px !important;
@@ -53,20 +89,17 @@ font-weight:800 !important;
 letter-spacing:1px;
 margin-bottom:10px;
 }
-
 /* 二级标题 */
 h2{
 font-size:22px !important;
 font-weight:600 !important;
 margin-top:22px !important;
 }
-
 /* 正文 */
 p{
 font-size:16px;
 line-height:1.8;
 }
-
 /* 引用角标 */
 .ref{
 color:#1f77b4;
@@ -74,13 +107,11 @@ font-size:13px;
 font-weight:600;
 margin-left:3px;
 }
-
 /* 引用角标链接 */
 .ref a{
 color:#1f77b4;
 text-decoration:none;
 }
-
 /* 文件类型徽标 */
 .file-badge {
     display:inline-block;
@@ -96,9 +127,7 @@ text-decoration:none;
 .badge-doc  { background:#f1f8e9; color:#558b2f; }
 .badge-img  { background:#fff8e1; color:#f57f17; }
 .badge-unknown { background:#f5f5f5; color:#616161; }
-
 /* ===== 文件上传组件汉化 ===== */
-
 /* 隐藏"Drag and drop files here" */
 .ewslnz93 {
     display: none !important;
@@ -111,7 +140,6 @@ text-decoration:none;
     color: rgb(49, 51, 63);
     margin-bottom: 4px;
 }
-
 /* 隐藏"Limit 200MB per file..." */
 .ewslnz94 {
     display: none !important;
@@ -124,7 +152,6 @@ text-decoration:none;
     color: #888;
     margin-top: 4px;
 }
-
 /* 隐藏英文"Browse files" —— 兼容新旧版本 */
 [data-testid="stFileUploaderDropzone"] button[data-testid="baseButton-secondary"],
 [data-testid="stFileUploaderDropzone"] button[data-testid="stBaseButton-secondary"] {
@@ -145,7 +172,6 @@ text-decoration:none;
     pointer-events: none;
     font-size: 14px; 
 }
-
 </style>
 """, unsafe_allow_html=True)
 
@@ -374,10 +400,11 @@ def load_single_file(path: str, filename: str, api_key: str) -> list[Document]:
 # ================= 构建向量库 =================
 
 @st.cache_resource
-def build_vector_db(uploaded_files, _file_hashes, api_key):
+def build_vector_db(uploaded_files, _file_hashes, api_key, chunk_size=1000, chunk_overlap=200):
     """
     构建向量数据库。
-    _file_hashes 用于缓存失效（文件内容或API Key变化时重建）。
+    _file_hashes 用于缓存失效（文件内容、API Key 或分块参数变化时重建）。
+    chunk_size / chunk_overlap 直接参与缓存 key，修改后自动重建。
     """
     docs = []
     failed_files = []
@@ -421,8 +448,8 @@ def build_vector_db(uploaded_files, _file_hashes, api_key):
         st.stop()
 
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=200
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap
     )
     splits = splitter.split_documents(docs)
 
@@ -430,12 +457,266 @@ def build_vector_db(uploaded_files, _file_hashes, api_key):
 
     vectordb = Chroma.from_documents(splits, embeddings)
 
-    return vectordb
+    return vectordb, docs  # 同时返回 docs，供批量测试复用
 
 
-# 生成文件哈希值（含 api_key 防止切换key后用旧向量库）
-file_hashes = tuple(hash(f.getvalue()) for f in uploaded_files)
-vectordb = build_vector_db(uploaded_files, file_hashes, api_key)
+# ================= 分块参数（侧边栏） =================
+
+st.sidebar.markdown("<div class='sidebar-title'>✂️ 文本分块参数</div>", unsafe_allow_html=True)
+
+# 若已通过"最优参数测试"写入 session_state，则以其为默认值
+_default_chunk_size    = st.session_state.get("best_chunk_size", 1000)
+_default_chunk_overlap = st.session_state.get("best_chunk_overlap", 200)
+
+# 用 number_input：直接输入数字，回车立即生效，同时也可拖动步进箭头
+chunk_size = st.sidebar.number_input(
+    "Chunk Size（每块字符数）",
+    min_value=200, max_value=2000, step=100,
+    value=_default_chunk_size,
+    help="每个文本块的最大字符数，越大则上下文越完整，但噪声也越多"
+)
+chunk_overlap = st.sidebar.number_input(
+    "Chunk Overlap（重叠字符数）",
+    min_value=0, max_value=500, step=50,
+    value=_default_chunk_overlap,
+    help="相邻块之间的重叠字符数，越大则跨块信息损失越少"
+)
+
+if chunk_overlap >= chunk_size:
+    st.sidebar.warning("⚠️ Overlap 不能大于或等于 Chunk Size，请重新设置")
+    st.stop()
+
+# 生成文件哈希值（含 api_key、分块参数，任意变化都会触发重建）
+file_hashes = tuple(hash(f.getvalue()) for f in uploaded_files) + (chunk_size, chunk_overlap)
+_result = build_vector_db(uploaded_files, file_hashes, api_key, chunk_size, chunk_overlap)
+vectordb, _loaded_docs = _result
+
+
+# ================= 批量参数测试 =================
+
+st.sidebar.markdown("<div class='sidebar-title'>🔬 分块参数测试</div>", unsafe_allow_html=True)
+st.sidebar.caption("自动对比多组参数的检索质量，找到最优组合")
+
+# 测试问题输入
+test_queries_input = st.sidebar.text_area(
+    "输入测试问题（每行一个，至少1个）",
+    placeholder="例：\n文档的主要内容是什么？\n有哪些关键数据？",
+    height=100
+)
+
+# 待测参数候选值
+test_chunk_sizes    = st.sidebar.multiselect(
+    "测试 Chunk Size 候选值",
+    options=[200, 300, 500, 800, 1000, 1200, 1500, 2000],
+    default=[500, 1000, 1500]
+)
+test_chunk_overlaps = st.sidebar.multiselect(
+    "测试 Chunk Overlap 候选值",
+    options=[0, 50, 100, 150, 200, 300],
+    default=[0, 100, 200]
+)
+
+run_test = st.sidebar.button("🚀 开始参数测试", use_container_width=True)
+
+if run_test:
+    # ---- 输入校验 ----
+    test_queries = [q.strip() for q in test_queries_input.strip().splitlines() if q.strip()]
+    if not test_queries:
+        st.sidebar.error("请至少输入一个测试问题")
+    elif not test_chunk_sizes or not test_chunk_overlaps:
+        st.sidebar.error("请选择至少一个 Chunk Size 和 Chunk Overlap 候选值")
+    else:
+        st.markdown("---")
+        st.markdown("## 🔬 分块参数测试报告")
+
+        embeddings_obj = DashScopeEmbeddings(model="text-embedding-v2")
+
+        # 预先加载文档（复用已加载的 docs，避免重复 IO）
+        import itertools
+
+        combos = [
+            (cs, co)
+            for cs, co in itertools.product(test_chunk_sizes, test_chunk_overlaps)
+            if co < cs
+        ]
+
+        if not combos:
+            st.warning("所有候选组合中 Overlap ≥ Chunk Size，无有效组合，请调整候选值")
+        else:
+            results_table = []   # [{chunk_size, chunk_overlap, avg_score, scores_per_query}]
+
+            total_combos = len(combos)
+            prog = st.progress(0, text="正在测试参数组合...")
+
+            for idx, (cs, co) in enumerate(combos):
+                prog.progress(
+                    (idx + 1) / total_combos,
+                    text=f"测试组合 {idx+1}/{total_combos}：chunk_size={cs}, chunk_overlap={co}"
+                )
+
+                # 构建临时向量库
+                splitter_tmp = RecursiveCharacterTextSplitter(
+                    chunk_size=cs, chunk_overlap=co
+                )
+                splits_tmp = splitter_tmp.split_documents(_loaded_docs)
+                vdb_tmp = Chroma.from_documents(splits_tmp, embeddings_obj,
+                                                collection_name=f"test_{cs}_{co}")
+
+                # 对每个测试问题检索，取 Top-5 平均相似度
+                query_scores = []
+                for q in test_queries:
+                    hits = vdb_tmp.similarity_search_with_score(q, k=min(5, len(splits_tmp)))
+                    if hits:
+                        avg = sum(1 / (1 + s) for _, s in hits) / len(hits)
+                        query_scores.append(round(avg, 4))
+
+                avg_score = round(sum(query_scores) / len(query_scores), 4) if query_scores else 0
+
+                results_table.append({
+                    "chunk_size":    cs,
+                    "chunk_overlap": co,
+                    "avg_score":     avg_score,
+                    "per_query":     query_scores,
+                })
+
+                # 释放临时向量库
+                vdb_tmp.delete_collection()
+
+            prog.empty()
+
+            # ---- 找最优 ----
+            best = max(results_table, key=lambda x: x["avg_score"])
+            st.session_state["best_chunk_size"]   = best["chunk_size"]
+            st.session_state["best_chunk_overlap"] = best["chunk_overlap"]
+
+            # ---- 热力图（纯 HTML/CSS，无需 matplotlib）----
+            import json
+
+            # 构建热力图数据
+            size_vals    = sorted(set(r["chunk_size"]    for r in results_table))
+            overlap_vals = sorted(set(r["chunk_overlap"] for r in results_table))
+            score_map    = {(r["chunk_size"], r["chunk_overlap"]): r["avg_score"]
+                            for r in results_table}
+            all_scores   = [r["avg_score"] for r in results_table]
+            min_s, max_s = min(all_scores), max(all_scores)
+
+            def score_to_color(score):
+                if max_s == min_s:
+                    t = 1.0
+                else:
+                    t = (score - min_s) / (max_s - min_s)
+                r_c = int(255 * (1 - t))
+                g_c = int(200 * t)
+                return f"rgb({r_c},{g_c},80)"
+
+            # 热力图 HTML
+            cell_w = 90
+            header_w = 80
+            cell_h = 52
+
+            heatmap_rows = ""
+            for co in overlap_vals:
+                cells = ""
+                for cs in size_vals:
+                    sc = score_map.get((cs, co), None)
+                    if sc is None:
+                        cells += f"<td style='width:{cell_w}px;height:{cell_h}px;background:#eee;color:#aaa;text-align:center;font-size:12px;border:1px solid #ddd;'>N/A</td>"
+                    else:
+                        is_best = (cs == best["chunk_size"] and co == best["chunk_overlap"])
+                        border  = "3px solid #e74c3c" if is_best else "1px solid #ddd"
+                        star    = " ⭐" if is_best else ""
+                        cells  += (
+                            f"<td style='width:{cell_w}px;height:{cell_h}px;"
+                            f"background:{score_to_color(sc)};text-align:center;"
+                            f"font-size:13px;font-weight:{'700' if is_best else '400'};"
+                            f"border:{border};'>"
+                            f"{sc:.4f}{star}</td>"
+                        )
+                heatmap_rows += (
+                    f"<tr>"
+                    f"<td style='width:{header_w}px;text-align:center;font-weight:600;"
+                    f"font-size:13px;background:#f5f5f5;border:1px solid #ddd;padding:4px;'>"
+                    f"overlap<br>{co}</td>"
+                    f"{cells}</tr>"
+                )
+
+            header_cells = "".join(
+                f"<th style='width:{cell_w}px;text-align:center;background:#f0f0f0;"
+                f"font-size:13px;border:1px solid #ddd;padding:6px;'>size<br>{cs}</th>"
+                for cs in size_vals
+            )
+
+            heatmap_html = f"""
+            <div style='overflow-x:auto;margin:16px 0;'>
+            <p style='font-size:14px;color:#555;margin-bottom:8px;'>
+              纵轴 = chunk_overlap，横轴 = chunk_size，数值为平均检索相似度（越高越好）
+            </p>
+            <table style='border-collapse:collapse;font-family:monospace;'>
+              <thead>
+                <tr>
+                  <th style='width:{header_w}px;background:#e8e8e8;border:1px solid #ddd;'></th>
+                  {header_cells}
+                </tr>
+              </thead>
+              <tbody>{heatmap_rows}</tbody>
+            </table>
+            </div>
+            """
+
+            # ---- 最优参数卡片 ----
+            st.success(
+                f"✅ 测试完成！最优组合：**chunk_size = {best['chunk_size']}**，"
+                f"**chunk_overlap = {best['chunk_overlap']}**，"
+                f"平均相似度 = **{best['avg_score']:.4f}**"
+            )
+            st.info("💡 侧边栏滑块已自动更新为最优参数，**刷新页面后生效**（向量库将用最优参数重建）")
+
+            st.markdown("### 🌡️ 参数热力图（平均检索相似度）")
+            st.markdown(heatmap_html, unsafe_allow_html=True)
+
+            # ---- 排行表 ----
+            st.markdown("### 🏆 参数组合排行")
+            sorted_results = sorted(results_table, key=lambda x: x["avg_score"], reverse=True)
+
+            table_rows = ""
+            for rank, r in enumerate(sorted_results, 1):
+                medal = ["🥇", "🥈", "🥉"][rank - 1] if rank <= 3 else f"{rank}."
+                per_q = " / ".join(f"{s:.4f}" for s in r["per_query"])
+                is_best_row = (r["chunk_size"] == best["chunk_size"]
+                               and r["chunk_overlap"] == best["chunk_overlap"])
+                bg = "#fffde7" if is_best_row else "white"
+                table_rows += (
+                    f"<tr style='background:{bg};'>"
+                    f"<td style='padding:8px 12px;text-align:center;'>{medal}</td>"
+                    f"<td style='padding:8px 12px;text-align:center;'>{r['chunk_size']}</td>"
+                    f"<td style='padding:8px 12px;text-align:center;'>{r['chunk_overlap']}</td>"
+                    f"<td style='padding:8px 12px;text-align:center;font-weight:700;'>{r['avg_score']:.4f}</td>"
+                    f"<td style='padding:8px 12px;text-align:center;font-size:12px;color:#666;'>{per_q}</td>"
+                    f"</tr>"
+                )
+
+            table_html = f"""
+            <div style='overflow-x:auto;margin:12px 0;'>
+            <table style='width:100%;border-collapse:collapse;font-size:14px;text-align:center;'>
+              <thead>
+                <tr style='background:#f0f4ff;'>
+                  <th style='padding:8px 12px;text-align:center;'>排名</th>
+                  <th style='padding:8px 12px;text-align:center;'>chunk_size</th>
+                  <th style='padding:8px 12px;text-align:center;'>chunk_overlap</th>
+                  <th style='padding:8px 12px;text-align:center;'>平均相似度</th>
+                  <th style='padding:8px 12px;text-align:center;'>各问题得分（{' / '.join(f'Q{i+1}' for i in range(len(test_queries)))}）</th>
+                </tr>
+              </thead>
+              <tbody>{table_rows}</tbody>
+            </table>
+            </div>
+            """
+            st.markdown(table_html, unsafe_allow_html=True)
+
+            # ---- 测试问题回显 ----
+            with st.expander("📋 本次测试使用的问题"):
+                for i, q in enumerate(test_queries, 1):
+                    st.write(f"**Q{i}**：{q}")
 
 # ================= 停用词 =================
 
