@@ -97,6 +97,55 @@ text-decoration:none;
 .badge-img  { background:#fff8e1; color:#f57f17; }
 .badge-unknown { background:#f5f5f5; color:#616161; }
 
+/* ===== 文件上传组件汉化 ===== */
+
+/* 隐藏"Drag and drop files here" */
+.ewslnz93 {
+    display: none !important;
+}
+/* 用新元素替代显示中文 */
+[data-testid="stFileUploaderDropzoneInstructions"] > div::before {
+    content: "拖拽文件到此处";
+    display: block;
+    font-size: 14px;
+    color: rgb(49, 51, 63);
+    margin-bottom: 4px;
+}
+
+/* 隐藏"Limit 200MB per file..." */
+.ewslnz94 {
+    display: none !important;
+}
+/* 用新元素替代显示中文 */
+[data-testid="stFileUploaderDropzoneInstructions"] > div::after {
+    content: "每个文件限制 200MB";
+    display: block;
+    font-size: 12px;
+    color: #888;
+    margin-top: 4px;
+}
+
+/* 隐藏英文"Browse files" —— 兼容新旧版本 */
+[data-testid="stFileUploaderDropzone"] button[data-testid="baseButton-secondary"],
+[data-testid="stFileUploaderDropzone"] button[data-testid="stBaseButton-secondary"] {
+    color: transparent !important;
+    position: relative;
+    overflow: hidden;
+}
+/* 替换为中文"浏览文件" */
+[data-testid="stFileUploaderDropzone"] button[data-testid="baseButton-secondary"]::after,
+[data-testid="stFileUploaderDropzone"] button[data-testid="stBaseButton-secondary"]::after {
+    content: "浏览文件";
+    color: rgb(49, 51, 63);
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    white-space: nowrap;
+    pointer-events: none;
+    font-size: 14px; 
+}
+
 </style>
 """, unsafe_allow_html=True)
 
