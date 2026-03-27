@@ -18,7 +18,6 @@ from langchain_community.document_loaders import (
 from langchain_core.documents import Document
 from langchain_community.embeddings import DashScopeEmbeddings
 from langchain_chroma import Chroma
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.chat_models import ChatTongyi
 
 # ================= 页面配置 =================
@@ -80,6 +79,15 @@ section[data-testid="stSidebar"] [data-testid="stSliderLabel"] {
 /* 修复滑块刻度文字大小 */
 section[data-testid="stSidebar"] [data-testid="stSliderValue"] {
     font-size:12px !important;
+}
+/* 上传文件后显示的文件名/信息，与其他 L3 层级保持一致 */
+section[data-testid="stSidebar"] [data-testid="stFileUploaderFile"] span,
+section[data-testid="stSidebar"] [data-testid="stFileUploaderFile"] p,
+section[data-testid="stSidebar"] [data-testid="stFileUploaderFileName"],
+section[data-testid="stSidebar"] [data-testid="stFileUploaderFileData"] {
+    font-size:12px !important;
+    font-weight:400 !important;
+    color:#888 !important;
 }
 /* ===== 主页面 ===== */
 /* 主标题 */
@@ -236,55 +244,6 @@ def file_badge(ext: str) -> str:
     return f"<span class='file-badge {css_class}'>{label}</span>"
 
 
-# ================= 侧边栏文档预览（支持多格式） =================
-
-st.sidebar.markdown("<div class='sidebar-title'>📑 文档预览</div>", unsafe_allow_html=True)
-
-for f in uploaded_files:
-    ext = get_ext(f.name)
-    icon = FILE_ICONS.get(ext, "📎")
-
-    with st.sidebar.expander(f"{icon} {f.name}"):
-        if ext == "txt":
-            try:
-                preview = f.getvalue().decode("utf-8")[:500]
-                st.write(preview + ("..." if len(f.getvalue()) > 500 else ""))
-            except UnicodeDecodeError:
-                st.warning("文件编码不是 UTF-8，无法预览")
-
-        elif ext == "pdf":
-            size_kb = len(f.getvalue()) / 1024
-            st.caption(f"📕 PDF 文件 · {size_kb:.1f} KB")
-            st.info("PDF 内容将在构建向量库时自动提取")
-
-        elif ext in ("docx", "doc"):
-            size_kb = len(f.getvalue()) / 1024
-            st.caption(f"📘 Word 文件 · {size_kb:.1f} KB")
-            st.info("Word 内容将在构建向量库时自动提取")
-
-        elif ext in IMAGE_TYPES:
-            st.image(f.getvalue(), use_container_width=True)
-            st.caption("🖼️ 图片将通过通义千问VL提取文字内容")
-
-        else:
-            st.warning(f"不支持预览此格式：.{ext}")
-
-# ================= 参数 =================
-
-st.sidebar.markdown("<div class='sidebar-title'>⚙️ Top-K 检索数量</div>", unsafe_allow_html=True)
-
-top_k = st.sidebar.slider(
-    "检索文档数量",
-    1, 10, 5
-)
-
-st.sidebar.markdown("<div class='sidebar-title'>🐞 RAG Debug</div>", unsafe_allow_html=True)
-
-debug_mode = st.sidebar.checkbox("显示检索结果")
-
-st.sidebar.markdown("<div class='sidebar-title'>💻 控制台调试输出</div>", unsafe_allow_html=True)
-console_output = st.sidebar.checkbox("启用控制台调试输出", value=False)
-
 
 # ================= 图片 OCR：通义千问VL =================
 
@@ -397,26 +356,291 @@ def load_single_file(path: str, filename: str, api_key: str) -> list[Document]:
         )]
 
 
+# ================= 语义分块 =================
+
+# 代码块围栏
+_CODE_FENCE_RE = re.compile(r'^(`{3,}|~{3,})', re.MULTILINE)
+
+# 句子边界
+_SENTENCE_END_RE = re.compile(r'(?<=[。！？\.!\?])\s*')
+
+# 每个 chunk 最大 token 数（写死，不暴露给用户）
+_MAX_TOKENS = 500
+_OVERLAP_TOKENS = 75
+# 合并阈值：低于此 token 数的段落要向下合并
+_MIN_TOKENS = 150
+
+
+def _estimate_tokens(text: str) -> int:
+    """粗估 token 数：中文 1字/token，英文约 4字符/token。"""
+    chinese = len(re.findall(r'[\u4e00-\u9fa5]', text))
+    others  = len(text) - chinese
+    return chinese + max(0, others // 4)
+
+
+def _split_by_sentences(text: str, max_tok: int, overlap_tok: int) -> list[str]:
+    """
+    对单个过长语义段按句子边界二次切分，并在子块之间保留 overlap。
+    只有同一语义段内的子块才加 overlap，跨段不加。
+    """
+    sentences = [s for s in _SENTENCE_END_RE.split(text) if s.strip()]
+
+    chunks, buf, buf_tok = [], [], 0
+    for sent in sentences:
+        sent_tok = _estimate_tokens(sent)
+        if buf_tok + sent_tok > max_tok and buf:
+            chunks.append(''.join(buf))
+            # overlap：从末尾回溯
+            overlap_buf, overlap_tok_count = [], 0
+            for s in reversed(buf):
+                t = _estimate_tokens(s)
+                if overlap_tok_count + t > overlap_tok:
+                    break
+                overlap_buf.insert(0, s)
+                overlap_tok_count += t
+            buf, buf_tok = overlap_buf, overlap_tok_count
+        buf.append(sent)
+        buf_tok += _estimate_tokens(sent)
+
+    if buf:
+        chunks.append(''.join(buf))
+
+    # 兜底：单句超长则按字符硬切
+    result = []
+    char_limit = max_tok * 3
+    for c in chunks:
+        if len(c) <= char_limit:
+            result.append(c)
+        else:
+            for start in range(0, len(c), char_limit - overlap_tok * 2):
+                result.append(c[start: start + char_limit])
+    return result
+
+
+def _heading_level(line: str) -> int:
+    """
+    判断标题行的层级（数字越小越高）。
+    返回 0 表示不是标题。
+    层级定义：
+      1 = 最高：Markdown # / 第X章 / 汉字一级（一、二、三、）
+      2 = 次级：Markdown ## / 第X节 / FAQ
+      3 = 三级：Markdown ### 及更深
+    """
+    s = line.strip()
+    # Markdown
+    m = re.match(r'^(#{1,6})\s+\S', s)
+    if m:
+        depth = len(m.group(1))
+        return min(depth, 3)
+    # 第X章
+    if re.match(r'^第[一二三四五六七八九十百千\d]+章\s*\S', s):
+        return 1
+    # 第X节/条/款/部分
+    if re.match(r'^第[一二三四五六七八九十百千\d]+[节条款部分]\s*\S', s):
+        return 2
+    # 汉字一级：一、二、三、
+    if re.match(r'^[一二三四五六七八九十]{1,3}[、]\s*\S', s):
+        return 1
+    # FAQ
+    if re.match(r'^(?:Q|问|FAQ)\s*[：:]\s*\S', s):
+        return 2
+    return 0
+
+
+def semantic_chunk_document(doc: Document) -> list[dict]:
+    """
+    对单篇文档做语义分块，返回 chunk 信息列表。
+    每个元素：{ text, section_path, token_count, chunk_index }
+
+    三阶段：
+    1. 按章节标题切出语义段，维护多级标题栈，
+       section_path 形如「第二章 总则 > 第三条 定义」
+    2. 过短段落循环合并（< _MIN_TOKENS）
+    3. 过长段落按句子二次切分（同段内加 overlap），子块路径加编号
+    """
+    text   = doc.page_content
+    # 只取文件名，不要完整磁盘路径
+    source = os.path.basename(doc.metadata.get("source", "未知文件"))
+
+    # ── 第一阶段：识别结构边界，维护层级栈，切出语义段 ──────────
+    lines = text.splitlines(keepends=True)
+    raw_segments: list[tuple[str, str]] = []   # (section_path, content)
+
+    # 层级栈：每个元素 (level, title_text)
+    heading_stack: list[tuple[int, str]] = []
+    buf: list[str] = []
+    in_code        = False
+
+    def current_path() -> str:
+        """把栈里的标题拼成 文件名 > 章 > 节 > 条 的路径"""
+        if not heading_stack:
+            return source
+        return source + " > " + " > ".join(t for _, t in heading_stack)
+
+    for line in lines:
+        # 代码块开关
+        if _CODE_FENCE_RE.match(line):
+            if not in_code:
+                if buf:
+                    raw_segments.append((current_path(), ''.join(buf)))
+                    buf = []
+                in_code = True
+                buf = [line]
+            else:
+                buf.append(line)
+                raw_segments.append((current_path() + " > [代码块]", ''.join(buf)))
+                buf = []
+                in_code = False
+            continue
+
+        if in_code:
+            buf.append(line)
+            continue
+
+        level = _heading_level(line.strip())
+        if level > 0:
+            # 保存当前缓冲
+            if buf:
+                raw_segments.append((current_path(), ''.join(buf)))
+                buf = []
+            # 弹出层级 >= 当前的标题，维护栈
+            while heading_stack and heading_stack[-1][0] >= level:
+                heading_stack.pop()
+            # 标题文字：去掉 # 前缀和首尾空格
+            title_text = line.strip().lstrip('#').strip()
+            heading_stack.append((level, title_text))
+            buf = [line]
+            continue
+
+        buf.append(line)
+
+    if buf:
+        raw_segments.append((current_path(), ''.join(buf)))
+
+    # ── 第二阶段：清洗 + 循环合并过短段落 ────────────────────────
+    cleaned: list[tuple[str, str]] = []
+    for sec, seg in raw_segments:
+        seg = re.sub(r'(?m)^\s*\d+\s*$', '', seg)   # 纯页码行
+        seg = re.sub(r'\n[=\-_]{3,}\n', '\n', seg)  # 分隔线
+        seg = seg.strip()
+        if seg:
+            cleaned.append((sec, seg))
+
+    def _same_parent(path_a: str, path_b: str) -> bool:
+        """判断两个路径是否属于同一父章节（去掉最后一级后前缀相同）"""
+        parts_a = path_a.split(" > ")
+        parts_b = path_b.split(" > ")
+        return parts_a[:-1] == parts_b[:-1]
+
+    def _is_parent_of(path_a: str, path_b: str) -> bool:
+        """判断 path_a 是否是 path_b 的直接父路径（章标题行合并到第一个子段）"""
+        return path_b.startswith(path_a + " > ")
+
+    def _merge_once(segs: list[tuple[str, str]]) -> tuple[list[tuple[str, str]], bool]:
+        merged, changed = [], False
+        i = 0
+        while i < len(segs):
+            sec, seg = segs[i]
+            tok = _estimate_tokens(seg)
+            if tok < _MIN_TOKENS and i + 1 < len(segs):
+                next_sec, next_seg = segs[i + 1]
+                combined_tok = tok + _estimate_tokens(next_seg)
+                # 合并条件：合并后不超长，且满足以下任一：
+                # (a) 同一父章节内的短段
+                # (b) 纯章节标题行（极短）向下合并到其第一个子段
+                can_merge = combined_tok <= _MAX_TOKENS and (
+                    _same_parent(sec, next_sec) or
+                    (_is_parent_of(sec, next_sec) and tok < 20)
+                )
+                if can_merge:
+                    merged.append((next_sec, seg + '\n' + next_seg))
+                    i += 2
+                    changed = True
+                else:
+                    merged.append((sec, seg))
+                    i += 1
+            else:
+                merged.append((sec, seg))
+                i += 1
+        return merged, changed
+
+    merged = cleaned
+    for _ in range(20):
+        merged, changed = _merge_once(merged)
+        if not changed:
+            break
+
+    # ── 第三阶段：过长二次切分，子块路径加编号 ────────────────────
+    chunks = []
+    idx = 0
+    for sec, seg in merged:
+        tok = _estimate_tokens(seg)
+        if tok <= _MAX_TOKENS:
+            sub_list = [seg]
+        else:
+            sub_list = _split_by_sentences(seg, _MAX_TOKENS, _OVERLAP_TOKENS)
+
+        total_subs = len(sub_list)
+        for sub_i, sub in enumerate(sub_list):
+            sub = sub.strip()
+            if not sub:
+                continue
+            section_label = f"{sec} - {sub_i + 1}" if total_subs > 1 else sec
+            chunks.append({
+                "chunk_index":   idx,
+                "section_path":  section_label,
+                "token_count":   _estimate_tokens(sub),
+                "text":          sub,
+            })
+            idx += 1
+
+    # 兜底
+    if not chunks:
+        chunks.append({
+            "chunk_index":  0,
+            "section_path": source,
+            "token_count":  _estimate_tokens(text),
+            "text":         text.strip(),
+        })
+
+    return chunks
+
+
+def chunks_to_documents(chunk_dicts: list[dict], base_meta: dict) -> list[Document]:
+    """将 chunk dict 列表转为 LangChain Document，前缀拼接来源+章节。"""
+    docs = []
+    source = base_meta.get("source", "")
+    for c in chunk_dicts:
+        prefix  = f"【来源：{source}】【章节：{c['section_path']}】\n"
+        content = prefix + c["text"]
+        meta    = {
+            **base_meta,
+            "chunk_index":  c["chunk_index"],
+            "section_path": c["section_path"],
+            "token_count":  c["token_count"],
+        }
+        docs.append(Document(page_content=content, metadata=meta))
+    return docs
+
+
 # ================= 构建向量库 =================
 
 @st.cache_resource
-def build_vector_db(uploaded_files, _file_hashes, api_key, chunk_size=1000, chunk_overlap=200):
+def build_vector_db(uploaded_files, _file_hashes, api_key):
     """
     构建向量数据库。
-    _file_hashes 用于缓存失效（文件内容、API Key 或分块参数变化时重建）。
-    chunk_size / chunk_overlap 直接参与缓存 key，修改后自动重建。
+    _file_hashes 用于缓存失效（文件内容或 API Key 变化时重建）。
+    分块参数固定，无需用户调整。
     """
     docs = []
     failed_files = []
-
     temp_dir = tempfile.TemporaryDirectory()
 
-    # 进度条
     progress = st.progress(0, text="正在处理文件...")
     total = len(uploaded_files)
 
     for i, file in enumerate(uploaded_files):
-        ext = get_ext(file.name)
+        ext  = get_ext(file.name)
         icon = FILE_ICONS.get(ext, "📎")
         progress.progress(
             (i + 1) / total,
@@ -429,7 +653,6 @@ def build_vector_db(uploaded_files, _file_hashes, api_key, chunk_size=1000, chun
 
         loaded = load_single_file(path, file.name, api_key)
 
-        # 检查是否加载失败（错误文档）
         for doc in loaded:
             if doc.metadata.get("error"):
                 failed_files.append(file.name)
@@ -439,7 +662,6 @@ def build_vector_db(uploaded_files, _file_hashes, api_key, chunk_size=1000, chun
 
     progress.empty()
 
-    # 显示加载失败的文件
     if failed_files:
         st.warning(f"以下文件加载时出现问题，请检查：{', '.join(failed_files)}")
 
@@ -447,276 +669,93 @@ def build_vector_db(uploaded_files, _file_hashes, api_key, chunk_size=1000, chun
         st.error("所有文件均加载失败，无法构建向量库")
         st.stop()
 
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap
-    )
-    splits = splitter.split_documents(docs)
+    # 语义分块
+    splits = []
+    for doc in docs:
+        chunk_dicts = semantic_chunk_document(doc)
+        splits.extend(chunks_to_documents(chunk_dicts, doc.metadata))
 
     embeddings = DashScopeEmbeddings(model="text-embedding-v2")
+    vectordb   = Chroma.from_documents(splits, embeddings)
 
-    vectordb = Chroma.from_documents(splits, embeddings)
+    # 同时缓存每个文件的 chunk 预览数据，供侧边栏展示
+    chunk_preview: dict[str, list[dict]] = {}
+    for doc in docs:
+        fname = os.path.basename(doc.metadata.get("source", ""))
+        chunk_preview.setdefault(fname, []).extend(
+            semantic_chunk_document(doc)
+        )
 
-    return vectordb, docs  # 同时返回 docs，供批量测试复用
-
-
-# ================= 分块参数（侧边栏） =================
-
-st.sidebar.markdown("<div class='sidebar-title'>✂️ 文本分块参数</div>", unsafe_allow_html=True)
-
-# 若已通过"最优参数测试"写入 session_state，则以其为默认值
-_default_chunk_size    = st.session_state.get("best_chunk_size", 1000)
-_default_chunk_overlap = st.session_state.get("best_chunk_overlap", 200)
-
-# 用 number_input：直接输入数字，回车立即生效，同时也可拖动步进箭头
-chunk_size = st.sidebar.number_input(
-    "Chunk Size（每块字符数）",
-    min_value=200, max_value=2000, step=100,
-    value=_default_chunk_size,
-    help="每个文本块的最大字符数，越大则上下文越完整，但噪声也越多"
-)
-chunk_overlap = st.sidebar.number_input(
-    "Chunk Overlap（重叠字符数）",
-    min_value=0, max_value=500, step=50,
-    value=_default_chunk_overlap,
-    help="相邻块之间的重叠字符数，越大则跨块信息损失越少"
-)
-
-if chunk_overlap >= chunk_size:
-    st.sidebar.warning("⚠️ Overlap 不能大于或等于 Chunk Size，请重新设置")
-    st.stop()
-
-# 生成文件哈希值（含 api_key、分块参数，任意变化都会触发重建）
-file_hashes = tuple(hash(f.getvalue()) for f in uploaded_files) + (chunk_size, chunk_overlap)
-_result = build_vector_db(uploaded_files, file_hashes, api_key, chunk_size, chunk_overlap)
-vectordb, _loaded_docs = _result
+    return vectordb, chunk_preview
 
 
-# ================= 批量参数测试 =================
+# ================= 构建向量库（调用） =================
 
-st.sidebar.markdown("<div class='sidebar-title'>🔬 分块参数测试</div>", unsafe_allow_html=True)
-st.sidebar.caption("自动对比多组参数的检索质量，找到最优组合")
+file_hashes = tuple(hash(f.getvalue()) for f in uploaded_files)
+_result     = build_vector_db(uploaded_files, file_hashes, api_key)
+vectordb, _chunk_preview = _result
 
-# 测试问题输入
-test_queries_input = st.sidebar.text_area(
-    "输入测试问题（每行一个，至少1个）",
-    placeholder="例：\n文档的主要内容是什么？\n有哪些关键数据？",
-    height=100
-)
 
-# 待测参数候选值
-test_chunk_sizes    = st.sidebar.multiselect(
-    "测试 Chunk Size 候选值",
-    options=[200, 300, 500, 800, 1000, 1200, 1500, 2000],
-    default=[500, 1000, 1500]
-)
-test_chunk_overlaps = st.sidebar.multiselect(
-    "测试 Chunk Overlap 候选值",
-    options=[0, 50, 100, 150, 200, 300],
-    default=[0, 100, 200]
-)
+# ================= 侧边栏：分块预览 =================
 
-run_test = st.sidebar.button("🚀 开始参数测试", use_container_width=True)
+st.sidebar.markdown("<div class='sidebar-title'>📑 文档分块预览</div>", unsafe_allow_html=True)
 
-if run_test:
-    # ---- 输入校验 ----
-    test_queries = [q.strip() for q in test_queries_input.strip().splitlines() if q.strip()]
-    if not test_queries:
-        st.sidebar.error("请至少输入一个测试问题")
-    elif not test_chunk_sizes or not test_chunk_overlaps:
-        st.sidebar.error("请选择至少一个 Chunk Size 和 Chunk Overlap 候选值")
-    else:
-        st.markdown("---")
-        st.markdown("## 🔬 分块参数测试报告")
+for f in uploaded_files:
+    ext  = get_ext(f.name)
+    icon = FILE_ICONS.get(ext, "📎")
+    chunks_for_file = _chunk_preview.get(f.name, [])
+    total_chunks    = len(chunks_for_file)
 
-        embeddings_obj = DashScopeEmbeddings(model="text-embedding-v2")
+    with st.sidebar.expander(f"{icon} {f.name}  · {total_chunks} 个 chunk"):
+        if ext in IMAGE_TYPES:
+            st.image(f.getvalue(), use_container_width=True)
+            st.caption("🖼️ 图片已通过通义千问VL提取文字，分块结果如下")
 
-        # 预先加载文档（复用已加载的 docs，避免重复 IO）
-        import itertools
-
-        combos = [
-            (cs, co)
-            for cs, co in itertools.product(test_chunk_sizes, test_chunk_overlaps)
-            if co < cs
-        ]
-
-        if not combos:
-            st.warning("所有候选组合中 Overlap ≥ Chunk Size，无有效组合，请调整候选值")
+        if not chunks_for_file:
+            st.caption("暂无分块数据")
         else:
-            results_table = []   # [{chunk_size, chunk_overlap, avg_score, scores_per_query}]
+            for c in chunks_for_file:
+                # section_path 已包含 文件名 > 章 > 节，直接显示
+                display_path = c["section_path"]
 
-            total_combos = len(combos)
-            prog = st.progress(0, text="正在测试参数组合...")
-
-            for idx, (cs, co) in enumerate(combos):
-                prog.progress(
-                    (idx + 1) / total_combos,
-                    text=f"测试组合 {idx+1}/{total_combos}：chunk_size={cs}, chunk_overlap={co}"
+                st.markdown(
+                    f"<div style='"
+                    f"background:#f0f4ff;border-left:3px solid #4a90e2;"
+                    f"padding:6px 10px;border-radius:4px;margin-top:10px;"
+                    f"font-size:12px;color:#444;line-height:1.6;'>"
+                    f"<b>Chunk #{c['chunk_index'] + 1}</b> &nbsp;·&nbsp; "
+                    f"{c['token_count']} tokens<br>"
+                    f"<span style='color:#888;'>📂 {display_path}</span>"
+                    f"</div>",
+                    unsafe_allow_html=True
+                )
+                preview_text = c["text"][:300] + ("…" if len(c["text"]) > 300 else "")
+                st.markdown(
+                    f"<div style='"
+                    f"background:#fafafa;border:1px solid #e0e0e0;"
+                    f"padding:8px 10px;border-radius:4px;"
+                    f"font-size:12px;color:#333;line-height:1.7;"
+                    f"white-space:pre-wrap;word-break:break-all;'>"
+                    f"{preview_text}"
+                    f"</div>",
+                    unsafe_allow_html=True
                 )
 
-                # 构建临时向量库
-                splitter_tmp = RecursiveCharacterTextSplitter(
-                    chunk_size=cs, chunk_overlap=co
-                )
-                splits_tmp = splitter_tmp.split_documents(_loaded_docs)
-                vdb_tmp = Chroma.from_documents(splits_tmp, embeddings_obj,
-                                                collection_name=f"test_{cs}_{co}")
 
-                # 对每个测试问题检索，取 Top-5 平均相似度
-                query_scores = []
-                for q in test_queries:
-                    hits = vdb_tmp.similarity_search_with_score(q, k=min(5, len(splits_tmp)))
-                    if hits:
-                        avg = sum(1 / (1 + s) for _, s in hits) / len(hits)
-                        query_scores.append(round(avg, 4))
+# ================= 参数 =================
 
-                avg_score = round(sum(query_scores) / len(query_scores), 4) if query_scores else 0
+st.sidebar.markdown("<div class='sidebar-title'>⚙️ Top-K 检索数量</div>", unsafe_allow_html=True)
+st.sidebar.markdown("<div style='font-size:12px;color:#888;margin:-4px 0 6px;'>召回最相关的 K 个文本块，建议值 3–6</div>", unsafe_allow_html=True)
 
-                results_table.append({
-                    "chunk_size":    cs,
-                    "chunk_overlap": co,
-                    "avg_score":     avg_score,
-                    "per_query":     query_scores,
-                })
+top_k = st.sidebar.slider(
+    "检索文档数量",
+    1, 10, 5
+)
 
-                # 释放临时向量库
-                vdb_tmp.delete_collection()
+st.sidebar.markdown("<div class='sidebar-title'>🐞 RAG Debug</div>", unsafe_allow_html=True)
 
-            prog.empty()
+debug_mode = st.sidebar.checkbox("显示检索结果")
 
-            # ---- 找最优 ----
-            best = max(results_table, key=lambda x: x["avg_score"])
-            st.session_state["best_chunk_size"]   = best["chunk_size"]
-            st.session_state["best_chunk_overlap"] = best["chunk_overlap"]
-
-            # ---- 热力图（纯 HTML/CSS，无需 matplotlib）----
-            import json
-
-            # 构建热力图数据
-            size_vals    = sorted(set(r["chunk_size"]    for r in results_table))
-            overlap_vals = sorted(set(r["chunk_overlap"] for r in results_table))
-            score_map    = {(r["chunk_size"], r["chunk_overlap"]): r["avg_score"]
-                            for r in results_table}
-            all_scores   = [r["avg_score"] for r in results_table]
-            min_s, max_s = min(all_scores), max(all_scores)
-
-            def score_to_color(score):
-                if max_s == min_s:
-                    t = 1.0
-                else:
-                    t = (score - min_s) / (max_s - min_s)
-                r_c = int(255 * (1 - t))
-                g_c = int(200 * t)
-                return f"rgb({r_c},{g_c},80)"
-
-            # 热力图 HTML
-            cell_w = 90
-            header_w = 80
-            cell_h = 52
-
-            heatmap_rows = ""
-            for co in overlap_vals:
-                cells = ""
-                for cs in size_vals:
-                    sc = score_map.get((cs, co), None)
-                    if sc is None:
-                        cells += f"<td style='width:{cell_w}px;height:{cell_h}px;background:#eee;color:#aaa;text-align:center;font-size:12px;border:1px solid #ddd;'>N/A</td>"
-                    else:
-                        is_best = (cs == best["chunk_size"] and co == best["chunk_overlap"])
-                        border  = "3px solid #e74c3c" if is_best else "1px solid #ddd"
-                        star    = " ⭐" if is_best else ""
-                        cells  += (
-                            f"<td style='width:{cell_w}px;height:{cell_h}px;"
-                            f"background:{score_to_color(sc)};text-align:center;"
-                            f"font-size:13px;font-weight:{'700' if is_best else '400'};"
-                            f"border:{border};'>"
-                            f"{sc:.4f}{star}</td>"
-                        )
-                heatmap_rows += (
-                    f"<tr>"
-                    f"<td style='width:{header_w}px;text-align:center;font-weight:600;"
-                    f"font-size:13px;background:#f5f5f5;border:1px solid #ddd;padding:4px;'>"
-                    f"overlap<br>{co}</td>"
-                    f"{cells}</tr>"
-                )
-
-            header_cells = "".join(
-                f"<th style='width:{cell_w}px;text-align:center;background:#f0f0f0;"
-                f"font-size:13px;border:1px solid #ddd;padding:6px;'>size<br>{cs}</th>"
-                for cs in size_vals
-            )
-
-            heatmap_html = f"""
-            <div style='overflow-x:auto;margin:16px 0;'>
-            <p style='font-size:14px;color:#555;margin-bottom:8px;'>
-              纵轴 = chunk_overlap，横轴 = chunk_size，数值为平均检索相似度（越高越好）
-            </p>
-            <table style='border-collapse:collapse;font-family:monospace;'>
-              <thead>
-                <tr>
-                  <th style='width:{header_w}px;background:#e8e8e8;border:1px solid #ddd;'></th>
-                  {header_cells}
-                </tr>
-              </thead>
-              <tbody>{heatmap_rows}</tbody>
-            </table>
-            </div>
-            """
-
-            # ---- 最优参数卡片 ----
-            st.success(
-                f"✅ 测试完成！最优组合：**chunk_size = {best['chunk_size']}**，"
-                f"**chunk_overlap = {best['chunk_overlap']}**，"
-                f"平均相似度 = **{best['avg_score']:.4f}**"
-            )
-            st.info("💡 侧边栏滑块已自动更新为最优参数，**刷新页面后生效**（向量库将用最优参数重建）")
-
-            st.markdown("### 🌡️ 参数热力图（平均检索相似度）")
-            st.markdown(heatmap_html, unsafe_allow_html=True)
-
-            # ---- 排行表 ----
-            st.markdown("### 🏆 参数组合排行")
-            sorted_results = sorted(results_table, key=lambda x: x["avg_score"], reverse=True)
-
-            table_rows = ""
-            for rank, r in enumerate(sorted_results, 1):
-                medal = ["🥇", "🥈", "🥉"][rank - 1] if rank <= 3 else f"{rank}."
-                per_q = " / ".join(f"{s:.4f}" for s in r["per_query"])
-                is_best_row = (r["chunk_size"] == best["chunk_size"]
-                               and r["chunk_overlap"] == best["chunk_overlap"])
-                bg = "#fffde7" if is_best_row else "white"
-                table_rows += (
-                    f"<tr style='background:{bg};'>"
-                    f"<td style='padding:8px 12px;text-align:center;'>{medal}</td>"
-                    f"<td style='padding:8px 12px;text-align:center;'>{r['chunk_size']}</td>"
-                    f"<td style='padding:8px 12px;text-align:center;'>{r['chunk_overlap']}</td>"
-                    f"<td style='padding:8px 12px;text-align:center;font-weight:700;'>{r['avg_score']:.4f}</td>"
-                    f"<td style='padding:8px 12px;text-align:center;font-size:12px;color:#666;'>{per_q}</td>"
-                    f"</tr>"
-                )
-
-            table_html = f"""
-            <div style='overflow-x:auto;margin:12px 0;'>
-            <table style='width:100%;border-collapse:collapse;font-size:14px;text-align:center;'>
-              <thead>
-                <tr style='background:#f0f4ff;'>
-                  <th style='padding:8px 12px;text-align:center;'>排名</th>
-                  <th style='padding:8px 12px;text-align:center;'>chunk_size</th>
-                  <th style='padding:8px 12px;text-align:center;'>chunk_overlap</th>
-                  <th style='padding:8px 12px;text-align:center;'>平均相似度</th>
-                  <th style='padding:8px 12px;text-align:center;'>各问题得分（{' / '.join(f'Q{i+1}' for i in range(len(test_queries)))}）</th>
-                </tr>
-              </thead>
-              <tbody>{table_rows}</tbody>
-            </table>
-            </div>
-            """
-            st.markdown(table_html, unsafe_allow_html=True)
-
-            # ---- 测试问题回显 ----
-            with st.expander("📋 本次测试使用的问题"):
-                for i, q in enumerate(test_queries, 1):
-                    st.write(f"**Q{i}**：{q}")
 
 # ================= 停用词 =================
 
@@ -959,26 +998,10 @@ if query:
     st.session_state.messages.append({"role": "user", "content": query})
     st.chat_message("user").write(query)
 
-    if console_output:
-        print("\n" + "=" * 80)
-        print(f"📝 用户问题: {query}")
-        print("=" * 80)
-
     with st.chat_message("assistant"):
 
         sources = get_sources(query)
         total_sources = len(sources)
-
-        if console_output:
-            print(f"\n🔍 检索到 Top-{top_k} 文档:")
-            print("-" * 80)
-            for i, src in enumerate(sources, start=1):
-                print(f"\n【文档 {i}】")
-                print(f"来源文件: {src['source']} | 类型: {src['file_type']}")
-                ocr_tag = " [图片OCR]" if src['is_image_ocr'] else ""
-                print(f"相似度得分: {src['score']:.3f} ({src['score'] * 100:.1f}%){ocr_tag}")
-                print(f"内容预览 (前200字):\n{src['content'][:200]}...")
-                print("-" * 80)
 
         context = ""
         for i, src in enumerate(sources, start=1):
@@ -1005,19 +1028,7 @@ if query:
 {context}
 """
 
-        if console_output:
-            print("\n📤 发送给 LLM 的 Prompt:")
-            print("-" * 80)
-            print(rag_prompt)
-            print("-" * 80)
-
         answer = llm.invoke(rag_prompt).content
-
-        if console_output:
-            print("\n🤖 LLM 原始回答:")
-            print("-" * 80)
-            print(answer)
-            print("-" * 80)
 
         # 清理中文数字编号
         chinese_num_map = {
@@ -1036,20 +1047,6 @@ if query:
 
         answer = re.sub(r"引用来源[:：].*", "", answer)
         answer = re.sub(r"\n?\s*(\[\d+\]\s*)+\s*$", "", answer)
-
-        if console_output:
-            print("\n✅ 清理后的最终答案:")
-            print("-" * 80)
-            print(answer)
-            print("-" * 80)
-            print("\n📎 引用映射:")
-            if mapping:
-                for old, new in mapping.items():
-                    src = sources[old - 1]
-                    print(f"  [{new}] -> 原始文档 [{old}] ({src['source']})")
-            else:
-                print("  无引用")
-            print("=" * 80 + "\n")
 
         styled_answer = style_refs(answer)
         st.markdown(styled_answer, unsafe_allow_html=True)
