@@ -610,6 +610,7 @@ def chunks_to_documents(chunk_dicts: list[dict], base_meta: dict) -> list[Docume
     """将 chunk dict 列表转为 LangChain Document，前缀拼接来源+章节。"""
     docs = []
     source = base_meta.get("source", "")
+    source = os.path.basename(source)
     for c in chunk_dicts:
         prefix  = f"【来源：{source}】【章节：{c['section_path']}】\n"
         content = prefix + c["text"]
