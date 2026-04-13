@@ -201,12 +201,12 @@ st.title("📚 文档问答系统")
 SUPPORTED_TYPES = ["txt", "pdf", "docx", "doc", "png", "jpg", "jpeg"]
 
 FILE_ICONS = {
-    "txt":  "📄",
-    "pdf":  "📕",
+    "txt": "📄",
+    "pdf": "📕",
     "docx": "📘",
-    "doc":  "📗",
-    "png":  "🖼️",
-    "jpg":  "🖼️",
+    "doc": "📗",
+    "png": "🖼️",
+    "jpg": "🖼️",
     "jpeg": "🖼️",
 }
 
@@ -253,7 +253,6 @@ def file_badge(ext: str) -> str:
         "badge-img" if ext in IMAGE_TYPES else "badge-unknown"
     )
     return f"<span class='file-badge {css_class}'>{label}</span>"
-
 
 
 # ================= 图片 OCR：通义千问VL =================
@@ -320,11 +319,43 @@ def load_single_file(path: str, filename: str, api_key: str) -> list[Document]:
             loader = PyPDFLoader(path)
             docs = loader.load()
             if not docs or all(not d.page_content.strip() for d in docs):
-                # PDF 可能是扫描件，提示用户
-                return [Document(
-                    page_content=f"[{filename}：PDF内容为空，可能是扫描件图片型PDF，建议转换为图片后上传]",
-                    metadata={"source": filename}
-                )]
+                # PDF 是扫描件，尝试逐页 OCR
+                if not api_key:
+                    return [Document(
+                        page_content=f"[{filename}：PDF内容为空（扫描件），请在侧边栏输入API Key以启用自动OCR]",
+                        metadata={"source": filename}
+                    )]
+                try:
+                    from pdf2image import convert_from_path
+                    pages = convert_from_path(path, dpi=150)
+                    ocr_docs = []
+                    for i, page_img in enumerate(pages):
+                        import io
+                        buf = io.BytesIO()
+                        page_img.save(buf, format="PNG")
+                        img_bytes = buf.getvalue()
+                        page_text = extract_text_from_image_qwen(img_bytes, f"{filename}_p{i+1}.png", api_key)
+                        if page_text.strip():
+                            ocr_docs.append(Document(
+                                page_content=page_text,
+                                metadata={"source": filename, "type": "image_ocr", "page": i + 1}
+                            ))
+                    if ocr_docs:
+                        return ocr_docs
+                    return [Document(
+                        page_content=f"[{filename}：扫描件OCR未提取到文字内容，请检查图片质量]",
+                        metadata={"source": filename}
+                    )]
+                except ImportError:
+                    return [Document(
+                        page_content=f"[{filename}：检测到扫描件PDF，自动OCR需要安装pdf2image库（pip install pdf2image）]",
+                        metadata={"source": filename}
+                    )]
+                except Exception as e:
+                    return [Document(
+                        page_content=f"[{filename}：扫描件OCR处理失败：{str(e)}]",
+                        metadata={"source": filename}
+                    )]
             return docs
 
         elif ext == "docx":
@@ -385,7 +416,7 @@ _MIN_TOKENS = 150
 def _estimate_tokens(text: str) -> int:
     """粗估 token 数：中文 1字/token，英文约 4字符/token。"""
     chinese = len(re.findall(r'[\u4e00-\u9fa5]', text))
-    others  = len(text) - chinese
+    others = len(text) - chinese
     return chinese + max(0, others // 4)
 
 
@@ -469,18 +500,18 @@ def semantic_chunk_document(doc: Document) -> list[dict]:
     2. 过短段落循环合并（< _MIN_TOKENS）
     3. 过长段落按句子二次切分（同段内加 overlap），子块路径加编号
     """
-    text   = doc.page_content
+    text = doc.page_content
     # 只取文件名，不要完整磁盘路径
     source = os.path.basename(doc.metadata.get("source", "未知文件"))
 
     # ── 第一阶段：识别结构边界，维护层级栈，切出语义段 ──────────
     lines = text.splitlines(keepends=True)
-    raw_segments: list[tuple[str, str]] = []   # (section_path, content)
+    raw_segments: list[tuple[str, str]] = []  # (section_path, content)
 
     # 层级栈：每个元素 (level, title_text)
     heading_stack: list[tuple[int, str]] = []
     buf: list[str] = []
-    in_code        = False
+    in_code = False
 
     def current_path() -> str:
         """把栈里的标题拼成 文件名 > 章 > 节 > 条 的路径"""
@@ -531,7 +562,7 @@ def semantic_chunk_document(doc: Document) -> list[dict]:
     # ── 第二阶段：清洗 + 循环合并过短段落 ────────────────────────
     cleaned: list[tuple[str, str]] = []
     for sec, seg in raw_segments:
-        seg = re.sub(r'(?m)^\s*\d+\s*$', '', seg)   # 纯页码行
+        seg = re.sub(r'(?m)^\s*\d+\s*$', '', seg)  # 纯页码行
         seg = re.sub(r'\n[=\-_]{3,}\n', '\n', seg)  # 分隔线
         seg = seg.strip()
         if seg:
@@ -560,8 +591,8 @@ def semantic_chunk_document(doc: Document) -> list[dict]:
                 # (a) 同一父章节内的短段
                 # (b) 纯章节标题行（极短）向下合并到其第一个子段
                 can_merge = combined_tok <= _MAX_TOKENS and (
-                    _same_parent(sec, next_sec) or
-                    (_is_parent_of(sec, next_sec) and tok < 20)
+                        _same_parent(sec, next_sec) or
+                        (_is_parent_of(sec, next_sec) and tok < 20)
                 )
                 if can_merge:
                     merged.append((next_sec, seg + '\n' + next_seg))
@@ -598,20 +629,20 @@ def semantic_chunk_document(doc: Document) -> list[dict]:
                 continue
             section_label = f"{sec} - {sub_i + 1}" if total_subs > 1 else sec
             chunks.append({
-                "chunk_index":   idx,
-                "section_path":  section_label,
-                "token_count":   _estimate_tokens(sub),
-                "text":          sub,
+                "chunk_index": idx,
+                "section_path": section_label,
+                "token_count": _estimate_tokens(sub),
+                "text": sub,
             })
             idx += 1
 
     # 兜底
     if not chunks:
         chunks.append({
-            "chunk_index":  0,
+            "chunk_index": 0,
             "section_path": source,
-            "token_count":  _estimate_tokens(text),
-            "text":         text.strip(),
+            "token_count": _estimate_tokens(text),
+            "text": text.strip(),
         })
 
     return chunks
@@ -623,13 +654,13 @@ def chunks_to_documents(chunk_dicts: list[dict], base_meta: dict) -> list[Docume
     source = base_meta.get("source", "")
     source = os.path.basename(source)
     for c in chunk_dicts:
-        prefix  = f"【来源：{source}】【章节：{c['section_path']}】\n"
+        prefix = f"【来源：{source}】【章节：{c['section_path']}】\n"
         content = prefix + c["text"]
-        meta    = {
+        meta = {
             **base_meta,
-            "chunk_index":  c["chunk_index"],
+            "chunk_index": c["chunk_index"],
             "section_path": c["section_path"],
-            "token_count":  c["token_count"],
+            "token_count": c["token_count"],
         }
         docs.append(Document(page_content=content, metadata=meta))
     return docs
@@ -678,12 +709,12 @@ class BM25:
 
     def __init__(self, corpus: list[list[str]], k1: float = 1.5, b: float = 0.75):
         self.k1 = k1
-        self.b  = b
+        self.b = b
         self.corpus_size = len(corpus)
         self.avgdl = sum(len(d) for d in corpus) / max(self.corpus_size, 1)
 
         self.doc_freqs: list[dict] = []
-        self.doc_lens:  list[int]  = []
+        self.doc_lens: list[int] = []
         df: dict[str, int] = {}
 
         for doc in corpus:
@@ -711,9 +742,9 @@ class BM25:
                 if tf == 0:
                     continue
                 dl = self.doc_lens[i]
-                numerator   = tf * (self.k1 + 1)
+                numerator = tf * (self.k1 + 1)
                 denominator = tf + self.k1 * (1 - self.b + self.b * dl / self.avgdl)
-                scores[i]  += idf_val * numerator / denominator
+                scores[i] += idf_val * numerator / denominator
         return scores
 
 
@@ -734,11 +765,11 @@ def build_vector_db(uploaded_files, _file_hashes, api_key):
     total = len(uploaded_files)
 
     for i, file in enumerate(uploaded_files):
-        ext  = get_ext(file.name)
+        ext = get_ext(file.name)
         icon = FILE_ICONS.get(ext, "📎")
         progress.progress(
             (i + 1) / total,
-            text=f"正在处理 {icon} {file.name} ({i+1}/{total})"
+            text=f"正在处理 {icon} {file.name} ({i + 1}/{total})"
         )
 
         path = os.path.join(temp_dir.name, file.name)
@@ -770,11 +801,11 @@ def build_vector_db(uploaded_files, _file_hashes, api_key):
         splits.extend(chunks_to_documents(chunk_dicts, doc.metadata))
 
     embeddings = DashScopeEmbeddings(model="text-embedding-v2")
-    vectordb   = Chroma.from_documents(splits, embeddings)
+    vectordb = Chroma.from_documents(splits, embeddings)
 
     # 构建 BM25 索引（与向量库并行，用于混合检索）
     bm25_corpus = [tokenize(doc.page_content) for doc in splits]
-    bm25_index  = BM25(bm25_corpus)
+    bm25_index = BM25(bm25_corpus)
 
     # 同时缓存每个文件的 chunk 预览数据，供侧边栏展示
     chunk_preview: dict[str, list[dict]] = {}
@@ -790,19 +821,18 @@ def build_vector_db(uploaded_files, _file_hashes, api_key):
 # ================= 构建向量库（调用） =================
 
 file_hashes = tuple(hash(f.getvalue()) for f in uploaded_files)
-_result     = build_vector_db(uploaded_files, file_hashes, api_key)
+_result = build_vector_db(uploaded_files, file_hashes, api_key)
 vectordb, _chunk_preview, bm25_index, all_splits = _result
-
 
 # ================= 侧边栏：分块预览 =================
 
 st.sidebar.markdown("<div class='sidebar-title'>📑 文档分块预览</div>", unsafe_allow_html=True)
 
 for f in uploaded_files:
-    ext  = get_ext(f.name)
+    ext = get_ext(f.name)
     icon = FILE_ICONS.get(ext, "📎")
     chunks_for_file = _chunk_preview.get(f.name, [])
-    total_chunks    = len(chunks_for_file)
+    total_chunks = len(chunks_for_file)
 
     with st.sidebar.expander(f"{icon} {f.name}  · {total_chunks} 个 chunk"):
         if ext in IMAGE_TYPES:
@@ -839,11 +869,12 @@ for f in uploaded_files:
                     unsafe_allow_html=True
                 )
 
-
 # ================= 参数 =================
 
 st.sidebar.markdown("<div class='sidebar-title'>⚙️ Top-K 检索数量</div>", unsafe_allow_html=True)
-st.sidebar.markdown("<div style='font-size:12px;color:#888;margin:-4px 0 6px;'>召回最相关的 K 个文本块，建议值 3–6</div>", unsafe_allow_html=True)
+st.sidebar.markdown(
+    "<div style='font-size:12px;color:#888;margin:-4px 0 6px;'>召回最相关的 K 个文本块，建议值 3–6</div>",
+    unsafe_allow_html=True)
 
 top_k = st.sidebar.slider(
     "检索文档数量",
@@ -853,6 +884,12 @@ top_k = st.sidebar.slider(
 st.sidebar.markdown("<div class='sidebar-title'>🐞 RAG Debug</div>", unsafe_allow_html=True)
 
 debug_mode = st.sidebar.checkbox("显示检索结果")
+
+# ── 实验对比开关（论文测试用，测完可删除） ──
+st.sidebar.markdown("<div class='sidebar-title'>🧪 实验对比（论文测试）</div>", unsafe_allow_html=True)
+st.sidebar.caption("仅用于论文实验数据采集，正常使用请保持默认关闭")
+use_vector_only = st.sidebar.checkbox("仅向量检索（关闭BM25+RRF）", value=False)
+use_no_rewrite = st.sidebar.checkbox("关闭查询改写（使用原始问题）", value=False)
 
 # 清空对话按钮
 st.sidebar.markdown("<div class='sidebar-title'>💬 对话管理</div>", unsafe_allow_html=True)
@@ -992,12 +1029,12 @@ def highlight_evidence_sentences(text, answer):
         should_highlight = False
         if pattern_hit:
             should_highlight = True
-        elif char_ratio >= 0.35:          # 答案里35%以上的汉字出现在该单元
+        elif char_ratio >= 0.35:  # 答案里35%以上的汉字出现在该单元
             should_highlight = True
         elif char_ratio >= 0.20 and word_hit:
             should_highlight = True
 
-        if len(unit) < 6:                 # 过短片段（条目符号本身等）不高亮
+        if len(unit) < 6:  # 过短片段（条目符号本身等）不高亮
             should_highlight = False
 
         if should_highlight and highlighted_count < max_highlights:
@@ -1020,6 +1057,7 @@ def style_refs(answer):
     def replace_ref(match):
         num = match.group(1)
         return f"<sup class='ref'><a href='#ref-{num}'>[{num}]</a></sup>"
+
     answer = re.sub(r"\[(\d+)\]", replace_ref, answer)
     return answer
 
@@ -1050,18 +1088,22 @@ def get_sources(query: str) -> list[dict]:
                 vec_ranked.append((i, dist))
                 break
 
-    # ── BM25 检索路 ──────────────────────────────────────────────
-    query_tokens = tokenize(query)
-    bm25_scores  = bm25_index.get_scores(query_tokens)
-    bm25_top_idx = sorted(
-        range(len(bm25_scores)),
-        key=lambda i: bm25_scores[i],
-        reverse=True
-    )[:top_k * 2]
-    bm25_ranked = [(i, bm25_scores[i]) for i in bm25_top_idx]
-
-    # ── RRF 融合，取 Top-K ────────────────────────────────────────
-    fused_indices = rrf_fusion(vec_ranked, bm25_ranked)[:top_k]
+    # ── 仅向量检索模式（对比实验用） ────────────────────────────
+    if use_vector_only:
+        fused_indices = [idx for idx, _ in sorted(vec_ranked, key=lambda x: x[1])][:top_k]
+        bm25_scores = [0.0] * len(all_splits)
+    else:
+        # ── BM25 检索路 ──────────────────────────────────────────
+        query_tokens = tokenize(query)
+        bm25_scores = bm25_index.get_scores(query_tokens)
+        bm25_top_idx = sorted(
+            range(len(bm25_scores)),
+            key=lambda i: bm25_scores[i],
+            reverse=True
+        )[:top_k * 2]
+        bm25_ranked = [(i, bm25_scores[i]) for i in bm25_top_idx]
+        # ── RRF 融合，取 Top-K ────────────────────────────────────
+        fused_indices = rrf_fusion(vec_ranked, bm25_ranked)[:top_k]
 
     # ── 组装结果 ─────────────────────────────────────────────────
     results = []
@@ -1071,18 +1113,18 @@ def get_sources(query: str) -> list[dict]:
         doc = all_splits[idx]
         # 优先用向量相似度作为展示分，不在向量结果里则用 BM25 归一化分
         vec_score = next((round(1 / (1 + d), 3) for i, d in vec_ranked if i == idx), None)
-        bm25_raw  = bm25_scores[idx] if idx < len(bm25_scores) else 0.0
+        bm25_raw = bm25_scores[idx] if idx < len(bm25_scores) else 0.0
         display_score = vec_score if vec_score is not None else round(min(bm25_raw / 10, 1.0), 3)
 
         clean_content = re.sub(r'<[^>]+>', '', doc.page_content, flags=re.DOTALL)
-        source_name   = os.path.basename(doc.metadata.get("source", "未知"))
-        file_type     = get_ext(source_name)
+        source_name = os.path.basename(doc.metadata.get("source", "未知"))
+        file_type = get_ext(source_name)
 
         results.append({
-            "content":      clean_content,
-            "source":       source_name,
-            "score":        display_score,
-            "file_type":    file_type,
+            "content": clean_content,
+            "source": source_name,
+            "score": display_score,
+            "file_type": file_type,
             "is_image_ocr": doc.metadata.get("type") == "image_ocr",
         })
 
@@ -1115,10 +1157,27 @@ if query:
 
     with st.chat_message("assistant"):
 
-        # 自我介绍拦截
-        intro_keywords = ["你是谁", "你是什么", "介绍", "能做什么", "什么系统", "怎么用", "使用说明", "能干啥",
-                          "干什么", "功能", "帮我做", "可以做"]
-        if any(kw in query for kw in intro_keywords):
+        # ── 自我介绍拦截（意图判断，避免误触发） ──────────────────
+        # 正向触发：问题主语明确指向系统/助手本身
+        intro_phrases = [
+            "你是谁", "你是什么", "你叫什么", "你能做什么", "你可以做什么",
+            "你有什么功能", "你的功能是", "这个系统是什么", "这个系统能做什么",
+            "这个助手", "怎么使用这个", "如何使用你", "你支持什么格式",
+            "你怎么用", "使用说明", "能干啥", "你能干什么",
+            "介绍一下你", "介绍你自己", "介绍一下这个系统", "帮我介绍你自己"
+        ]
+        # 负向条件：包含文档内容相关词则说明用户在问文档，不应拦截
+        doc_related_words = [
+            "文档", "说明书", "手册", "产品", "功能介绍", "操作", "设置",
+            "参数", "规格", "电池", "吸力", "过滤", "充电", "清洁", "故障",
+            "维修", "保修", "安装", "连接", "APP", "模式", "传感器", "地毯",
+            "集尘", "过滤网", "边刷", "主刷", "导航", "建图", "续航"
+        ]
+        is_intro_query = (
+            any(phrase in query for phrase in intro_phrases)
+            and not any(dw in query for dw in doc_related_words)
+        )
+        if is_intro_query:
             intro = "你好！我是文档问答小助手 📚\n\n快速开始：在左侧输入API Key，上传文档，然后直接提问即可。\n\n侧边栏功能：文档分块预览、Top-K检索数量调节、RAG Debug模式、清空对话。\n\n我支持精准定位文档内容并标注引用来源，支持多文档检索和多轮对话。"
             st.markdown("""
 <div style='line-height:2;'>
@@ -1149,14 +1208,17 @@ if query:
             st.stop()
 
         # Query Rewriting：把口语化问题改写为更适合检索的专业表述
-        rewrite_prompt = (
-            "将以下用户问题改写为更适合文档检索的专业表述，"
-            "只输出改写后的问题，不要任何解释：\n" + query
-        )
-        search_query = llm.invoke(rewrite_prompt).content.strip()
+        if use_no_rewrite:
+            search_query = query  # 直接使用原始问题，跳过改写
+        else:
+            rewrite_prompt = (
+                    "将以下用户问题改写为更适合文档检索的专业表述，"
+                    "只输出改写后的问题，不要任何解释：\n" + query
+            )
+            search_query = llm.invoke(rewrite_prompt).content.strip()
 
         # 用改写后的 query 做混合检索
-        sources       = get_sources(search_query)
+        sources = get_sources(search_query)
         total_sources = len(sources)
 
         # 置信度警告：最高分低于阈值时提示用户
@@ -1197,16 +1259,16 @@ if query:
 7. 如果用户询问"你是什么"、"你能做什么"、"介绍一下你自己"、"这个系统是什么"
    等类似问题，请直接回复以下内容，不要输出ANSWER/EVIDENCE标签：
    "你好！我是文档问答小助手 📚
-   
+
    我可以帮你快速从上传的文档中找到答案，支持 TXT、PDF、Word、图片等格式。
    你只需要上传文档，然后直接提问就好啦～
-   
+
    我的能力包括：
    · 精准定位文档中的相关内容
    · 支持多文档同时检索
    · 引用时标注来源，方便核查
    · 支持追问和多轮对话
-   
+
    有什么问题尽管问我吧！"
 
 内部推理提示（不要在回答中体现）：
@@ -1264,6 +1326,7 @@ EVIDENCE填写规则（非常重要）：
 
         # ── 解析 <EVIDENCE>：{原始src编号 -> [原文片段列表]} ────────
         import json
+
         evidence_by_src: dict[int, list[str]] = {}
         evidence_match = re.search(r'<EVIDENCE>(.*?)</EVIDENCE>', raw_output, re.DOTALL)
         if evidence_match:
@@ -1376,6 +1439,38 @@ EVIDENCE填写规则（非常重要）：
             if search_query != query:
                 st.caption(f"🔁 问题改写：{query}  ➡️  {search_query}")
 
+            # ── 检索评估指标（Hit Rate / MRR / Top-1相似度） ──────────
+            # 从 EVIDENCE 中提取系统实际引用的片段索引（0-based）
+            cited_indices = set()
+            for ev_list in evidence_by_src.values():
+                for ev_text in ev_list:
+                    for j, src in enumerate(sources):
+                        if ev_text.strip() and ev_text.strip() in src["content"]:
+                            cited_indices.add(j)
+                            break
+
+            top1_score = sources[0]["score"] if sources else 0.0
+            # Hit Rate：Top-K 中是否有被引用的片段
+            hit = len(cited_indices) > 0
+            # MRR：被引用片段中排名最高的倒数排名
+            if cited_indices:
+                best_rank = min(cited_indices) + 1   # 1-based
+                mrr = round(1.0 / best_rank, 3)
+            else:
+                mrr = 0.0
+
+            with st.expander("📊 检索评估指标（基于本次问答自动计算）", expanded=False):
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Top-1 相似度", f"{top1_score:.1%}")
+                c2.metric("命中率 Hit Rate", "✅ 命中" if hit else "❌ 未命中",
+                          help="答案引用的片段是否出现在 Top-K 检索结果中")
+                c3.metric("MRR", f"{mrr:.3f}",
+                          help="答案引用片段排名的倒数均值（越高越好，最大为1）")
+                st.caption(
+                    "注：以上指标基于本次问答的检索结果与答案引用自动计算，"
+                    "不依赖人工标注。Hit Rate 和 MRR 以 EVIDENCE 片段的实际召回位置为依据。"
+                )
+
             chinese_tokens = [t for t in jieba.cut(query) if len(t) >= 2]
             english_tokens = re.findall(r'[A-Za-z0-9]+', query)
             query_tokens = [
@@ -1391,7 +1486,7 @@ EVIDENCE填写规则（非常重要）：
                 ocr_label = " · 🖼️OCR" if src['is_image_ocr'] else ""
 
                 with st.expander(
-                    f"{i}. {icon} {src['source']} ｜ 相似度 {score}%{ocr_label}{hit_label}"
+                        f"{i}. {icon} {src['source']} ｜ 相似度 {score}%{ocr_label}{hit_label}"
                 ):
                     text = highlight_query_keywords(src["content"], query)
                     st.markdown(text, unsafe_allow_html=True)
